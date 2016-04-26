@@ -29,31 +29,26 @@ class HITSSuite extends SparkFunSuite with LocalSparkContext {
       val tol = 1e-3
       val starGraph = GraphGenerators.starGraph(sc, nVertices).cache()
 
-      val hubAndAuthorityGraph = HITS.run(starGraph, 10)
+      // Normally this should converge in 1 iteration to the stationary point
+      // However, due to the initialization of scores to 1.0 and that
+      // nodes with 0 in- or out- degree do not have their authority or hub scores
+      // updated, it only asymptotically reaches the stationary point
+      val hubAndAuthorityGraph = starGraph.runHITS(3)
+
+      val scores = hubAndAuthorityGraph.vertices.collect()
+      // for better readability I should just collect as map directly on the degrees
+      // and do the translation to score in the loop itself
       val targetHubScores = starGraph.outDegrees.mapValues(
         v => if (v == 1.0) 1.0 / (nVertices.toDouble - 1) else 0.0
-      )
+      ).collectAsMap()
       val targetAuthorityScores = starGraph.inDegrees.mapValues(
         v => if (v == nVertices - 1) 1.0 else 0.0
-      )
+      ).collectAsMap()
 
-      //targetHubScores.collect().foreach(println)
-//      println("---------")
-//      hubAndAuthorityGraph.vertices.collect.foreach(println)
-
-      val nonMatchingHubScores = targetHubScores.innerJoin[(Double, Double), Long](
-        hubAndAuthorityGraph.vertices) {
-        (vid, target, estimated) =>
-          if (Math.abs(target - estimated._1) > tol) 1 else 0
-      }.map { case (vid, notMatch) => notMatch }.sum()
-      assert(nonMatchingHubScores === 0)
-
-      val nonMatchingAuthorityScores = targetAuthorityScores.innerJoin[(Double, Double), Long](
-        hubAndAuthorityGraph.vertices) {
-        (vid, target, estimated) =>
-          if (Math.abs(target - estimated._2) > tol) 1 else 0
-      }.map { case (vid, notMatch) => notMatch }.sum()
-      assert(nonMatchingAuthorityScores === 0)
+      for ((vid, (hubScore, authorityScore)) <- scores) {
+        assert( Math.abs(targetHubScores.getOrElse(vid, 0.0) - hubScore) < tol )
+        assert( Math.abs(targetAuthorityScores.getOrElse(vid, 0.0) - authorityScore) < tol )
+      }
     }
   } // end of test Star HITS
 
@@ -67,7 +62,10 @@ class HITSSuite extends SparkFunSuite with LocalSparkContext {
       val gridGraph = GraphGenerators.gridGraph(sc, rows, cols).cache()
       val hubsAndAuthoritiesGraph = HITS.run(gridGraph, numIter)
 
-      // manually verified hub scores
+      // Manually verified hub scores by constructing a dense adjacency matrix
+      // and performing power iterations
+      // In R where A is the directed adjacency matrix
+      // for(i in 1:30) {v = v %*% A %*% t(A); v = v / sum(v) }
       val targetHubScores = Array(
         0.000000012,
         0.000681770,
@@ -109,6 +107,8 @@ class HITSSuite extends SparkFunSuite with LocalSparkContext {
       val chain1 = (0 until 9).map(x => (x, x + 1))
       val rawEdges = sc.parallelize(chain1, 1).map { case (s, d) => (s.toLong, d.toLong) }
       val chain = Graph.fromEdgeTuples(rawEdges, 1.0).cache()
+      // The graph is initialized at a stationary point (up to normalization)
+      // so the number of iterations does not matter for this test
       val numIter = 4
       val tol = 1e-3
 
@@ -120,12 +120,8 @@ class HITSSuite extends SparkFunSuite with LocalSparkContext {
           if ( Math.abs(attr._1 - 0.1) < tol && Math.abs(attr._2 - 0.1) < tol) 0 else 1
       }.sum()
 
-      hubsAndAuthoritiesGraph.vertices.map {
-        case (vid, attr) =>
-          if ( Math.abs(attr._1 - 0.1) < tol && Math.abs(attr._2 - 0.1) < tol) 0 else 1
-      }.collect().foreach(println)
       assert(nonMatchingScores === 0)
     }
-  }
+  } // end of Chain HITS
 
 }
