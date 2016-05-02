@@ -52,6 +52,7 @@ import org.apache.spark.internal.Logging
  */
 object HITS extends Logging {
   private val MAX_ALLOWED_SCORE = 1e10
+  private val CHECKPOINT_FREQUENCY = 5
 
   /**
    * Run HITS for a fixed number of iterations returning a graph
@@ -125,7 +126,10 @@ object HITS extends Logging {
 
       // Only materialize the VertexRDD and compute the normalization constant
       // if it is necessary to handle numerical precision issues
-      if(scoreBound > MAX_ALLOWED_SCORE || iteration >= numIter) {
+      if(scoreBound > MAX_ALLOWED_SCORE ||
+        iteration >= numIter ||
+        iteration % CHECKPOINT_FREQUENCY == 0
+      ) {
         val normalization = hubsAndAuthoritiesGraph.vertices.aggregate((0.0, 0.0))(
           (v, u) => (u._2._1 + v._1, u._2._2 + v._2),
           (v1, v2) => (v1._1 + v2._1, v1._2 + v2._2)
