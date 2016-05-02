@@ -26,6 +26,7 @@ class HITSSuite extends SparkFunSuite with LocalSparkContext {
   test("Star HITS") {
     withSpark { sc =>
       val nVertices = 100
+      val numIter = 3
       val tol = 1e-3
       val starGraph = GraphGenerators.starGraph(sc, nVertices).cache()
 
@@ -33,21 +34,20 @@ class HITSSuite extends SparkFunSuite with LocalSparkContext {
       // However, due to the initialization of scores to 1.0 and that
       // nodes with 0 in- or out- degree do not have their authority or hub scores
       // updated, it only asymptotically reaches the stationary point
-      val hubAndAuthorityGraph = starGraph.runHITS(3)
+      val hubAndAuthorityGraph = starGraph.runHITS(numIter)
 
       val scores = hubAndAuthorityGraph.vertices.collect()
       // for better readability I should just collect as map directly on the degrees
       // and do the translation to score in the loop itself
-      val targetHubScores = starGraph.outDegrees.mapValues(
-        v => if (v == 1.0) 1.0 / (nVertices.toDouble - 1) else 0.0
-      ).collectAsMap()
-      val targetAuthorityScores = starGraph.inDegrees.mapValues(
-        v => if (v == nVertices - 1) 1.0 else 0.0
-      ).collectAsMap()
+      val outDegrees = starGraph.outDegrees.collectAsMap()
+      val isStarNode = (v: VertexId) => (outDegrees.getOrElse(v, 0.0) == 0.0)
 
       for ((vid, (hubScore, authorityScore)) <- scores) {
-        assert( Math.abs(targetHubScores.getOrElse(vid, 0.0) - hubScore) < tol )
-        assert( Math.abs(targetAuthorityScores.getOrElse(vid, 0.0) - authorityScore) < tol )
+        val targetHubScore = if (isStarNode(vid)) 0.0 else 1.0 / (nVertices.toDouble - 1)
+        val targetAuthorityScore = if (isStarNode(vid)) 1.0 else 0.0
+
+        assert( Math.abs(targetHubScore - hubScore) < tol )
+        assert( Math.abs(targetAuthorityScore - authorityScore) < tol )
       }
     }
   } // end of test Star HITS
@@ -60,7 +60,7 @@ class HITSSuite extends SparkFunSuite with LocalSparkContext {
       val numIter = 30
 
       val gridGraph = GraphGenerators.gridGraph(sc, rows, cols).cache()
-      val hubsAndAuthoritiesGraph = HITS.run(gridGraph, numIter)
+      val hubsAndAuthoritiesGraph = gridGraph.runHITS(numIter)
 
       // Manually verified hub scores by constructing a dense adjacency matrix
       // and performing power iterations
@@ -94,11 +94,10 @@ class HITSSuite extends SparkFunSuite with LocalSparkContext {
         0.000000000
         )
 
-      val errors = hubsAndAuthoritiesGraph.vertices.map { case (vid, attr) =>
-        if (Math.abs(targetHubScores(vid.toInt) - attr._1) > tol) 1 else 0
-      }.sum()
-
-      assert(errors === 0)
+      val scores = hubsAndAuthoritiesGraph.vertices.collect()
+      for ((vid, (hubScore, authorityScore)) <- scores) {
+        assert( Math.abs(targetHubScores(vid.toInt) - hubScore) < tol )
+      }
     }
   } // end of Grid HITS
 
@@ -107,20 +106,24 @@ class HITSSuite extends SparkFunSuite with LocalSparkContext {
       val chain1 = (0 until 9).map(x => (x, x + 1))
       val rawEdges = sc.parallelize(chain1, 1).map { case (s, d) => (s.toLong, d.toLong) }
       val chain = Graph.fromEdgeTuples(rawEdges, 1.0).cache()
-      // The graph is initialized at a stationary point (up to normalization)
-      // so the number of iterations does not matter for this test
-      val numIter = 4
+      val numIter = 2
       val tol = 1e-3
 
       val hubsAndAuthoritiesGraph = HITS.run(chain, numIter)
 
-      // all scores should remain = 1
-      val nonMatchingScores = hubsAndAuthoritiesGraph.vertices.map {
-        case (vid, attr) =>
-          if ( Math.abs(attr._1 - 0.1) < tol && Math.abs(attr._2 - 0.1) < tol) 0 else 1
-      }.sum()
+      val scores = hubsAndAuthoritiesGraph.vertices.collect()
+      val outDegrees = chain.outDegrees.collectAsMap()
+      val inDegrees = chain.inDegrees.collectAsMap()
+      val isChainStart = (v: VertexId) => inDegrees.getOrElse(v, 0) == 0
+      val isChainEnd = (v: VertexId) => outDegrees.getOrElse(v, 0) == 0
 
-      assert(nonMatchingScores === 0)
+      for ((vid, (hubScore, authorityScore)) <- scores) {
+        val targetHubScore = if (isChainEnd(vid)) 0.0 else 1.0 / 9.0
+        val targetAuthorityScore = if (isChainStart(vid)) 0.0 else 1.0 / 9.0
+
+        assert( Math.abs(targetHubScore - hubScore) < tol )
+        assert( Math.abs(targetAuthorityScore - authorityScore) < tol )
+      }
     }
   } // end of Chain HITS
 

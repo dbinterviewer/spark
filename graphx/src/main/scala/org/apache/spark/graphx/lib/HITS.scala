@@ -47,11 +47,7 @@ import org.apache.spark.internal.Logging
  *
  * This implementation slightly differs from the original HITS algorithm in that
  * 1) The focused subgraph is assumed to be the input
- * 2) Nodes with 0 in- or 0 out-degree are not updated and, hence, keep their initial
- *    value up to the normalization constant. This primarily has consequences when
- *    the maximum degree of the graph is 1. Otherwise, the normalization of the graph
- *    will drive the score to 0.
- * 3) Instead of normalizing to have scores with L2 norm = 1,
+ * 2) Instead of normalizing to have scores with L2 norm = 1,
  *    this uses L1 norm = 1
  */
 object HITS extends Logging {
@@ -75,10 +71,25 @@ object HITS extends Logging {
       s" but got ${numIter}")
 
     // Initialize the Hubs-Authority graph with each vertex containing
-    // 1.0 for the Hub and Authority scores.
-    var hubsAndAuthoritiesGraph: Graph[(Double, Double), ED] = graph
-      // Set the vertex attributes to initial hub and authority scores
-      .mapVertices { (id, attr) => (1.0, 1.0) }
+    // 1.0 for the initial Hub and Authority scores unless the
+    // in-degree is 0 which has 0.0 as the initial Authority score
+    // or the out-degree is 0 which has 0.0 as the initial Hub score
+    var hubsAndAuthoritiesGraph: Graph[(Double, Double), ED] =
+      graph.outerJoinVertices(graph.outDegrees) {
+        // Initialize hub scores
+        (id, oldAttr, outDegOpt) =>
+          outDegOpt match {
+            case Some(outdeg) => 1.0
+            case None => 0.0
+          }
+      }.outerJoinVertices(graph.inDegrees) {
+        // Initialize authority scores
+        (id, oldAttr, inDegOpt) =>
+          inDegOpt match {
+            case Some(indeg) => (oldAttr, 1.0)
+            case None => (oldAttr, 0.0)
+          }
+      }
 
     var iteration = 0
     var lastMaterializedGraph: Graph[(Double, Double), ED] = hubsAndAuthoritiesGraph
@@ -107,7 +118,9 @@ object HITS extends Logging {
 
       iteration += 1
 
-      // A trivial bound on the max score is
+      // A trivial bound on the max new authority score is max hub score * maxDegree
+      // Likewise the new hub score can be bounded by max authority score * maxDegree
+      // This gives a max updated score after hub and authority updates as
       scoreBound *= maxDegree * maxDegree
 
       // Only materialize the VertexRDD and compute the normalization constant
@@ -117,6 +130,9 @@ object HITS extends Logging {
           (v, u) => (u._2._1 + v._1, u._2._2 + v._2),
           (v1, v2) => (v1._1 + v2._1, v1._2 + v2._2)
         )
+        if (iteration != numIter) {
+          hubsAndAuthoritiesGraph.cache()
+        }
 
         if (lastMaterializedGraph != null) {
           lastMaterializedGraph.vertices.unpersist(false)
@@ -129,8 +145,9 @@ object HITS extends Logging {
         // is empty.
         hubsAndAuthoritiesGraph = hubsAndAuthoritiesGraph.mapVertices(
           (id, attr) => (attr._1 / normalization._1, attr._2 / normalization._2)
-        ).cache()
+        )
 
+        // The maximum score is <= 1.0 due to L1 normalization
         scoreBound = 1.0
       }
 
