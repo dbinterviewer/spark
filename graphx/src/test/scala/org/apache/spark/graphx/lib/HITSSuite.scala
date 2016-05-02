@@ -26,22 +26,19 @@ class HITSSuite extends SparkFunSuite with LocalSparkContext {
   test("Star HITS") {
     withSpark { sc =>
       val nVertices = 100
-      val numIter = 3
+      val numIter = 1
       val tol = 1e-3
       val starGraph = GraphGenerators.starGraph(sc, nVertices).cache()
 
-      // Normally this should converge in 1 iteration to the stationary point
-      // However, due to the initialization of scores to 1.0 and that
-      // nodes with 0 in- or out- degree do not have their authority or hub scores
-      // updated, it only asymptotically reaches the stationary point
+      // This should converge in 1 iteration to the stationary point
       val hubAndAuthorityGraph = starGraph.runHITS(numIter)
 
       val scores = hubAndAuthorityGraph.vertices.collect()
-      // for better readability I should just collect as map directly on the degrees
-      // and do the translation to score in the loop itself
       val outDegrees = starGraph.outDegrees.collectAsMap()
       val isStarNode = (v: VertexId) => (outDegrees.getOrElse(v, 0.0) == 0.0)
 
+      // The center of the star should have (hub, authority) score (0, 1)
+      // The leaves have scores (1 / 99, 0)
       for ((vid, (hubScore, authorityScore)) <- scores) {
         val targetHubScore = if (isStarNode(vid)) 0.0 else 1.0 / (nVertices.toDouble - 1)
         val targetAuthorityScore = if (isStarNode(vid)) 1.0 else 0.0
@@ -64,7 +61,7 @@ class HITSSuite extends SparkFunSuite with LocalSparkContext {
 
       // Manually verified hub scores by constructing a dense adjacency matrix
       // and performing power iterations
-      // In R where A is the directed adjacency matrix
+      // In R, where A is the directed adjacency matrix, this is computed by
       // for(i in 1:30) {v = v %*% A %*% t(A); v = v / sum(v) }
       val targetHubScores = Array(
         0.000000012,
